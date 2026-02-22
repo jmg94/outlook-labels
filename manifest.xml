@@ -6,7 +6,7 @@
   xsi:type="MailApp">
 
   <Id>e81aa574-6b27-4503-83cc-6bc235f80ea4</Id>
-  <Version>1.0.0.0</Version>
+  <Version>1.0.1.0</Version>
   <ProviderName>Gmail Labels for Outlook</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Labels"/>
