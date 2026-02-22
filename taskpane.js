@@ -191,16 +191,31 @@
 
   /**
    * Probe a single category to check if it belongs to this account.
-   * Tries to add it (no-op if it already exists in own account).
-   * Returns a promise that resolves to true (own) or false (shared).
+   * Tries addAsync — for own-account categories that already exist, this
+   * fails with "DuplicateCategory". For shared-account categories, it fails
+   * with a different error (e.g. permission denied). If addAsync succeeds,
+   * the category was somehow missing and we just re-created it (still ours).
+   *
+   * So: Succeeded OR DuplicateCategory → own account.
+   *     Any other error → shared account.
    */
   function probeCategory(cat) {
     return new Promise(function (resolve) {
       var testCat = [{ displayName: cat.displayName, color: cat.color }];
       Office.context.mailbox.masterCategories.addAsync(testCat, function (result) {
-        // If succeeded or already exists → it's ours
-        // If failed → it belongs to another account
-        resolve(result.status === Office.AsyncResultStatus.Succeeded);
+        if (result.status === Office.AsyncResultStatus.Succeeded) {
+          // Category didn't exist yet in our account but was added — it's ours
+          resolve(true);
+        } else {
+          // Check error code: DuplicateCategory means it already exists in OUR list
+          var errCode = (result.error && result.error.code) || '';
+          var errMsg = (result.error && result.error.message) || '';
+          var isDuplicate = errCode === 'DuplicateCategory' ||
+                           errMsg.indexOf('DuplicateCategory') !== -1 ||
+                           errMsg.indexOf('duplicate') !== -1 ||
+                           errMsg.indexOf('already') !== -1;
+          resolve(isDuplicate);
+        }
       });
     });
   }
