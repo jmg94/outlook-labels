@@ -135,18 +135,142 @@
     }
   }
 
+  // --- Own-category tracking via localStorage ---
+  // masterCategories.getAsync() on legacy Mac Outlook returns categories from
+  // ALL accounts (including shared mailboxes). The API provides no filter.
+  // We track which categories belong to the user's own account by:
+  //   1. Recording every category we create via this add-in
+  //   2. On load, probing write access: try to add a temp category — if it
+  //      succeeds, we have write access and can probe individual categories
+  //   3. Categories that can be successfully re-added (no-op for own account)
+  //      are ours; ones that fail belong to shared accounts
+  // We cache the result in localStorage so the probe only runs once per session
+  // or when new unknown categories appear.
+
+  var STORAGE_KEY_PREFIX = 'outlook_labels_own_';
+
+  function getStorageKey() {
+    var email = (Office.context.mailbox.userProfile.emailAddress || 'unknown').toLowerCase();
+    return STORAGE_KEY_PREFIX + email;
+  }
+
+  function loadOwnCategoryNames() {
+    try {
+      var data = localStorage.getItem(getStorageKey());
+      return data ? JSON.parse(data) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function saveOwnCategoryNames(names) {
+    try {
+      localStorage.setItem(getStorageKey(), JSON.stringify(names));
+    } catch (e) { /* ignore quota errors */ }
+  }
+
+  function addOwnCategoryName(name) {
+    var names = loadOwnCategoryNames();
+    var lower = name.toLowerCase();
+    var found = false;
+    for (var i = 0; i < names.length; i++) {
+      if (names[i].toLowerCase() === lower) { found = true; break; }
+    }
+    if (!found) {
+      names.push(name);
+      saveOwnCategoryNames(names);
+    }
+  }
+
+  function removeOwnCategoryName(name) {
+    var names = loadOwnCategoryNames();
+    var lower = name.toLowerCase();
+    names = names.filter(function (n) { return n.toLowerCase() !== lower; });
+    saveOwnCategoryNames(names);
+  }
+
+  /**
+   * Probe a single category to check if it belongs to this account.
+   * Tries to add it (no-op if it already exists in own account).
+   * Returns a promise that resolves to true (own) or false (shared).
+   */
+  function probeCategory(cat) {
+    return new Promise(function (resolve) {
+      var testCat = [{ displayName: cat.displayName, color: cat.color }];
+      Office.context.mailbox.masterCategories.addAsync(testCat, function (result) {
+        // If succeeded or already exists → it's ours
+        // If failed → it belongs to another account
+        resolve(result.status === Office.AsyncResultStatus.Succeeded);
+      });
+    });
+  }
+
+  /**
+   * Filter master categories to only those belonging to the user's own account.
+   * Uses cached known-own list first, then probes unknown ones.
+   */
+  function filterOwnCategories(allCategories) {
+    var knownOwn = loadOwnCategoryNames();
+    var knownOwnLower = knownOwn.map(function (n) { return n.toLowerCase(); });
+
+    var confirmed = [];
+    var unknown = [];
+
+    allCategories.forEach(function (cat) {
+      var nameLower = cat.displayName.toLowerCase();
+      if (knownOwnLower.indexOf(nameLower) !== -1) {
+        confirmed.push(cat);
+      } else {
+        unknown.push(cat);
+      }
+    });
+
+    if (unknown.length === 0) {
+      return Promise.resolve(confirmed);
+    }
+
+    // Probe unknown categories in parallel
+    var probes = unknown.map(function (cat) {
+      return probeCategory(cat).then(function (isOwn) {
+        return { category: cat, isOwn: isOwn };
+      });
+    });
+
+    return Promise.all(probes).then(function (results) {
+      var newOwnNames = [];
+      results.forEach(function (r) {
+        if (r.isOwn) {
+          confirmed.push(r.category);
+          newOwnNames.push(r.category.displayName);
+        }
+      });
+
+      // Update cache with newly confirmed own categories
+      if (newOwnNames.length > 0) {
+        var updated = knownOwn.concat(newOwnNames);
+        saveOwnCategoryNames(updated);
+      }
+
+      return confirmed;
+    });
+  }
+
   // --- Office.js Categories API wrappers ---
 
   function loadMasterCategories() {
     return new Promise(function (resolve, reject) {
       Office.context.mailbox.masterCategories.getAsync(function (result) {
         if (result.status === Office.AsyncResultStatus.Succeeded) {
-          state.masterCategories = result.value || [];
-          // Sort alphabetically
-          state.masterCategories.sort(function (a, b) {
-            return a.displayName.localeCompare(b.displayName);
+          var allCategories = result.value || [];
+          // Filter to only own-account categories
+          filterOwnCategories(allCategories).then(function (ownCategories) {
+            state.masterCategories = ownCategories;
+            // Sort alphabetically
+            state.masterCategories.sort(function (a, b) {
+              return a.displayName.localeCompare(b.displayName);
+            });
+            resolve(state.masterCategories);
           });
-          resolve(state.masterCategories);
         } else {
           reject(result.error);
         }
@@ -178,6 +302,7 @@
       var newCat = [{ displayName: displayName, color: colorPreset }];
       Office.context.mailbox.masterCategories.addAsync(newCat, function (result) {
         if (result.status === Office.AsyncResultStatus.Succeeded) {
+          addOwnCategoryName(displayName);
           resolve();
         } else {
           reject(result.error);
@@ -190,6 +315,7 @@
     return new Promise(function (resolve, reject) {
       Office.context.mailbox.masterCategories.removeAsync([displayName], function (result) {
         if (result.status === Office.AsyncResultStatus.Succeeded) {
+          removeOwnCategoryName(displayName);
           resolve();
         } else {
           reject(result.error);
