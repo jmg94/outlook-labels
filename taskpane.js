@@ -312,14 +312,36 @@
 
   function deleteMasterCategory(displayName) {
     return new Promise(function (resolve, reject) {
-      Office.context.mailbox.masterCategories.removeAsync([displayName], function (result) {
-        if (result.status === Office.AsyncResultStatus.Succeeded) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (!done) {
+          done = true;
           removeOwnCategoryName(displayName);
-          resolve();
-        } else {
-          reject(result.error);
+          reject({ message: 'Delete timed out \u2014 removed from list only' });
         }
-      });
+      }, 5000);
+
+      try {
+        Office.context.mailbox.masterCategories.removeAsync([displayName], function (result) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          if (result.status === Office.AsyncResultStatus.Succeeded) {
+            removeOwnCategoryName(displayName);
+            resolve();
+          } else {
+            removeOwnCategoryName(displayName);
+            reject(result.error || { message: 'Unknown error' });
+          }
+        });
+      } catch (e) {
+        if (!done) {
+          done = true;
+          clearTimeout(timer);
+          removeOwnCategoryName(displayName);
+          reject(e);
+        }
+      }
     });
   }
 
@@ -740,7 +762,13 @@
       })
       .catch(function (err) {
         closeDeleteDialog();
-        showStatus('Error deleting label: ' + (err.message || err), 'error');
+        buildMasterCategoriesFromOwn();
+        renderAppliedLabels();
+        renderAllLabels();
+        updateLabelCount();
+        renderSearchResults();
+        var msg = (err && err.message) ? err.message : String(err || 'Unknown error');
+        showStatus('Error deleting label: ' + msg, 'error');
       });
   }
 
