@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+  xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides/1.0"
+  xsi:type="MailApp">
+
+  <Id>e81aa574-6b27-4503-83cc-6bc235f80ea4</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Gmail Labels for Outlook</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="Labels"/>
+  <Description DefaultValue="Gmail-style labels for Outlook using Categories"/>
+  <IconUrl DefaultValue="https://jmg94.github.io/outlook-labels/assets/icon-64.png"/>
+  <HighResolutionIconUrl DefaultValue="https://jmg94.github.io/outlook-labels/assets/icon-128.png"/>
+  <SupportUrl DefaultValue="https://jmg94.github.io/outlook-labels"/>
+
+  <Hosts>
+    <Host Name="Mailbox"/>
+  </Hosts>
+
+  <Requirements>
+    <Sets>
+      <Set Name="Mailbox" MinVersion="1.8"/>
+    </Sets>
+  </Requirements>
+
+  <FormSettings>
+    <Form xsi:type="ItemRead">
+      <DesktopSettings>
+        <SourceLocation DefaultValue="https://jmg94.github.io/outlook-labels/taskpane.html"/>
+        <RequestedHeight>450</RequestedHeight>
+      </DesktopSettings>
+    </Form>
+  </FormSettings>
+
+  <Permissions>ReadWriteMailbox</Permissions>
+
+  <Rule xsi:type="RuleCollection" Mode="Or">
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Read"/>
+  </Rule>
+
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides"
+    xsi:type="VersionOverridesV1_0">
+
+    <Requirements>
+      <bt:Sets DefaultMinVersion="1.8">
+        <bt:Set Name="Mailbox"/>
+      </bt:Sets>
+    </Requirements>
+
+    <Hosts>
+      <Host xsi:type="MailHost">
+        <DesktopFormFactor>
+          <ExtensionPoint xsi:type="MessageReadCommandSurface">
+            <OfficeTab id="TabDefault">
+              <Group id="labelGroup">
+                <Label resid="GroupLabel"/>
+                <Control xsi:type="Button" id="openLabelsPane">
+                  <Label resid="PaneButton.Label"/>
+                  <Supertip>
+                    <Title resid="PaneButton.Label"/>
+                    <Description resid="PaneButton.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16x16"/>
+                    <bt:Image size="32" resid="Icon.32x32"/>
+                    <bt:Image size="80" resid="Icon.80x80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16x16" DefaultValue="https://jmg94.github.io/outlook-labels/assets/icon-16.png"/>
+        <bt:Image id="Icon.32x32" DefaultValue="https://jmg94.github.io/outlook-labels/assets/icon-32.png"/>
+        <bt:Image id="Icon.80x80" DefaultValue="https://jmg94.github.io/outlook-labels/assets/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://jmg94.github.io/outlook-labels/taskpane.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="GroupLabel" DefaultValue="Labels"/>
+        <bt:String id="PaneButton.Label" DefaultValue="Labels"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="PaneButton.Tooltip"
+          DefaultValue="Open the Labels pane to manage Gmail-style labels on this email"/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>
