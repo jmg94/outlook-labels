@@ -43,7 +43,9 @@
     isAllLabelsExpanded: false,
     focusedResultIndex: -1,
     pendingDeleteLabel: null,
-    statusTimer: null
+    statusTimer: null,
+    isSharedMailbox: false,
+    primaryEmail: ''
   };
 
   // --- DOM references ---
@@ -220,13 +222,53 @@
     });
   }
 
+  // --- Shared Mailbox Detection ---
+
+  function checkSharedMailbox() {
+    return new Promise(function (resolve) {
+      var item = Office.context.mailbox.item;
+      if (!item || !item.getSharedPropertiesAsync) {
+        state.isSharedMailbox = false;
+        resolve();
+        return;
+      }
+      item.getSharedPropertiesAsync(function (result) {
+        if (result.status === Office.AsyncResultStatus.Succeeded && result.value) {
+          // This item is from a shared/delegate mailbox
+          var owner = result.value.owner || '';
+          var userEmail = (Office.context.mailbox.userProfile.emailAddress || '').toLowerCase();
+          state.primaryEmail = userEmail;
+          // If the owner is different from the logged-in user, it's shared
+          state.isSharedMailbox = owner.toLowerCase() !== userEmail;
+        } else {
+          // getSharedPropertiesAsync failed = this is the user's own mailbox
+          state.isSharedMailbox = false;
+        }
+        resolve();
+      });
+    });
+  }
+
+  function applySharedMailboxRestrictions() {
+    if (state.isSharedMailbox) {
+      // Hide create/search — user can only view labels on shared items
+      dom.searchSection.classList.add('hidden');
+      // Disable delete buttons and toggle in all-labels
+      showStatus('Shared mailbox \u2014 view only', 'error');
+    }
+  }
+
   // --- Data Loading ---
 
   function loadAllData() {
     showView('loading');
-    Promise.all([loadMasterCategories(), loadItemCategories()])
+    checkSharedMailbox()
+      .then(function () {
+        return Promise.all([loadMasterCategories(), loadItemCategories()]);
+      })
       .then(function () {
         showView('main');
+        applySharedMailboxRestrictions();
         renderAppliedLabels();
         renderAllLabels();
         updateLabelCount();
@@ -261,16 +303,19 @@
       nameSpan.className = 'chip-name';
       nameSpan.textContent = cat.displayName;
 
-      var removeBtn = document.createElement('button');
-      removeBtn.className = 'chip-remove';
-      removeBtn.textContent = '\u00D7';
-      removeBtn.title = 'Remove ' + cat.displayName;
-      removeBtn.addEventListener('click', function () {
-        handleRemoveLabel(cat.displayName);
-      });
-
       chip.appendChild(nameSpan);
-      chip.appendChild(removeBtn);
+
+      if (!state.isSharedMailbox) {
+        var removeBtn = document.createElement('button');
+        removeBtn.className = 'chip-remove';
+        removeBtn.textContent = '\u00D7';
+        removeBtn.title = 'Remove ' + cat.displayName;
+        removeBtn.addEventListener('click', function () {
+          handleRemoveLabel(cat.displayName);
+        });
+        chip.appendChild(removeBtn);
+      }
+
       dom.appliedList.appendChild(chip);
     });
   }
@@ -428,24 +473,26 @@
       checkSpan.className = 'all-label-check';
       checkSpan.textContent = isLabelApplied(cat.displayName) ? '\u2713' : '';
 
-      var deleteBtn = document.createElement('button');
-      deleteBtn.className = 'all-label-delete';
-      deleteBtn.textContent = '\u00D7';
-      deleteBtn.title = 'Delete label';
-      deleteBtn.addEventListener('click', function (e) {
-        e.stopPropagation();
-        confirmDeleteLabel(cat.displayName);
-      });
-
       row.appendChild(colorDot);
       row.appendChild(nameSpan);
       row.appendChild(checkSpan);
-      row.appendChild(deleteBtn);
 
-      row.addEventListener('click', function () {
-        var applied = isLabelApplied(cat.displayName);
-        handleToggleLabel(cat.displayName, applied);
-      });
+      if (!state.isSharedMailbox) {
+        var deleteBtn = document.createElement('button');
+        deleteBtn.className = 'all-label-delete';
+        deleteBtn.textContent = '\u00D7';
+        deleteBtn.title = 'Delete label';
+        deleteBtn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          confirmDeleteLabel(cat.displayName);
+        });
+        row.appendChild(deleteBtn);
+
+        row.addEventListener('click', function () {
+          var applied = isLabelApplied(cat.displayName);
+          handleToggleLabel(cat.displayName, applied);
+        });
+      }
 
       dom.allLabelsList.appendChild(row);
     });
