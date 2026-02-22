@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Labels — Test Harness</title>
+  <link rel="stylesheet" href="taskpane.css"/>
+  <style>
+    /* Test harness controls panel */
+    #test-panel {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: 340px;
+      max-height: 100vh;
+      overflow-y: auto;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+      font-size: 12px;
+      padding: 16px;
+      box-shadow: -4px 0 16px rgba(0,0,0,0.3);
+      z-index: 9999;
+    }
+    #test-panel h2 {
+      color: #cba6f7;
+      font-size: 14px;
+      text-transform: none;
+      letter-spacing: 0;
+      margin-bottom: 12px;
+      border-bottom: 1px solid #45475a;
+      padding-bottom: 8px;
+    }
+    #test-panel h3 {
+      color: #a6e3a1;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin: 12px 0 6px;
+    }
+    #test-panel .info {
+      background: #313244;
+      padding: 8px;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      line-height: 1.5;
+    }
+    #test-panel .info code {
+      color: #f9e2af;
+    }
+    #test-panel button {
+      background: #45475a;
+      color: #cdd6f4;
+      border: 1px solid #585b70;
+      border-radius: 4px;
+      padding: 5px 10px;
+      cursor: pointer;
+      font-size: 11px;
+      font-family: inherit;
+      margin: 2px;
+      transition: all 0.15s;
+    }
+    #test-panel button:hover {
+      background: #585b70;
+      border-color: #cba6f7;
+    }
+    #test-panel button.active {
+      background: #cba6f7;
+      color: #1e1e2e;
+      border-color: #cba6f7;
+    }
+    #test-panel .log {
+      background: #11111b;
+      border-radius: 6px;
+      padding: 8px;
+      max-height: 200px;
+      overflow-y: auto;
+      font-size: 11px;
+      line-height: 1.6;
+      margin-top: 8px;
+    }
+    #test-panel .log .ok { color: #a6e3a1; }
+    #test-panel .log .err { color: #f38ba8; }
+    #test-panel .log .info-msg { color: #89b4fa; }
+    #test-panel .badge-count {
+      background: #cba6f7;
+      color: #1e1e2e;
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 10px;
+    }
+    /* Shift the add-in to the left to make room for test panel */
+    body { margin-right: 360px; }
+  </style>
+
+  <!--
+    ===================================================================
+    Office.js MOCK — replaces the real Office.js for browser testing
+    ===================================================================
+  -->
+  <script>
+  (function () {
+    'use strict';
+
+    // ---- MOCK DATA ----
+
+    // 3 "own" categories + 3 "shared/team" categories
+    // The add-in should show only the ones the user picks via import
+    var ALL_MASTER_CATEGORIES = [
+      { displayName: 'Project Alpha',  color: 'Preset4' },  // Green — own
+      { displayName: 'Urgent',         color: 'Preset0' },  // Red — own
+      { displayName: 'Follow Up',      color: 'Preset1' },  // Orange — own
+      { displayName: 'Team Standup',   color: 'Preset7' },  // Blue — shared
+      { displayName: 'HR Policies',    color: 'Preset8' },  // Purple — shared
+      { displayName: 'Finance Review', color: 'Preset10' }  // Steel — shared
+    ];
+
+    // Categories currently on the "open email"
+    var ITEM_CATEGORIES = [
+      { displayName: 'Urgent', color: 'Preset0' }
+    ];
+
+    // Expose for test panel manipulation
+    window.__mockData = {
+      masterCategories: ALL_MASTER_CATEGORIES,
+      itemCategories: ITEM_CATEGORIES
+    };
+
+    // ---- OFFICE MOCK ----
+
+    var Office = window.Office = {};
+
+    Office.HostType = { Outlook: 'Outlook' };
+
+    Office.AsyncResultStatus = {
+      Succeeded: 'succeeded',
+      Failed: 'failed'
+    };
+
+    Office.MailboxEnums = {
+      CategoryColor: (function () {
+        var map = {};
+        for (var i = 0; i <= 24; i++) map['Preset' + i] = 'Preset' + i;
+        return map;
+      })()
+    };
+
+    // Storage for the ready callback
+    var _readyCallback = null;
+
+    Office.onReady = function (cb) {
+      _readyCallback = cb;
+      // Fire after DOM is ready and scripts are loaded
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () {
+          setTimeout(function () { cb({ host: 'Outlook' }); }, 50);
+        });
+      } else {
+        setTimeout(function () { cb({ host: 'Outlook' }); }, 50);
+      }
+    };
+
+    // Helper: make a successful async result
+    function ok(value) {
+      return { status: 'succeeded', value: value };
+    }
+    function fail(msg) {
+      return { status: 'failed', error: { message: msg } };
+    }
+
+    // ---- mailbox mock ----
+
+    var mailbox = {
+      userProfile: {
+        emailAddress: 'jon.gjosund@grieg.no'
+      },
+      item: {
+        categories: {
+          getAsync: function (cb) {
+            setTimeout(function () { cb(ok(window.__mockData.itemCategories.slice())); }, 80);
+          },
+          addAsync: function (names, cb) {
+            names.forEach(function (name) {
+              var exists = window.__mockData.itemCategories.some(function (c) {
+                return c.displayName === name;
+              });
+              if (!exists) {
+                // Find color from master list
+                var master = window.__mockData.masterCategories.find(function (c) {
+                  return c.displayName === name;
+                });
+                window.__mockData.itemCategories.push({
+                  displayName: name,
+                  color: master ? master.color : 'Preset7'
+                });
+              }
+            });
+            setTimeout(function () { cb(ok(null)); }, 50);
+          },
+          removeAsync: function (names, cb) {
+            window.__mockData.itemCategories = window.__mockData.itemCategories.filter(function (c) {
+              return names.indexOf(c.displayName) === -1;
+            });
+            setTimeout(function () { cb(ok(null)); }, 50);
+          }
+        },
+        getSharedPropertiesAsync: function (cb) {
+          setTimeout(function () {
+            cb(ok({ owner: 'jon.gjosund@grieg.no' }));
+          }, 30);
+        }
+      },
+      masterCategories: {
+        getAsync: function (cb) {
+          setTimeout(function () { cb(ok(window.__mockData.masterCategories.slice())); }, 100);
+        },
+        addAsync: function (cats, cb) {
+          cats.forEach(function (cat) {
+            var exists = window.__mockData.masterCategories.some(function (c) {
+              return c.displayName.toLowerCase() === cat.displayName.toLowerCase();
+            });
+            if (!exists) {
+              window.__mockData.masterCategories.push({
+                displayName: cat.displayName,
+                color: cat.color
+              });
+            }
+          });
+          setTimeout(function () { cb(ok(null)); }, 50);
+        },
+        removeAsync: function (names, cb) {
+          window.__mockData.masterCategories = window.__mockData.masterCategories.filter(function (c) {
+            return names.indexOf(c.displayName) === -1;
+          });
+          setTimeout(function () { cb(ok(null)); }, 50);
+        }
+      }
+    };
+
+    Office.context = {
+      mailbox: mailbox,
+      requirements: {
+        isSetSupported: function () { return true; }
+      }
+    };
+  })();
+  </script>
+</head>
+<body>
+  <!-- === Exact copy of taskpane.html body content === -->
+  <div id="app">
+    <header>
+      <h1>Labels</h1>
+      <div class="header-actions">
+        <button id="import-btn" type="button" title="Sync from Outlook">&#9881;</button>
+        <button id="refresh-btn" type="button" title="Refresh">&#8635;</button>
+      </div>
+    </header>
+
+    <section id="current-labels">
+      <h2>Applied to this email</h2>
+      <div id="applied-labels-list"></div>
+      <p id="no-labels-msg" class="empty-state">No labels on this email</p>
+    </section>
+
+    <section id="search-section">
+      <h2>Add a label</h2>
+      <div id="search-container">
+        <input type="text" id="label-search" placeholder="Search or create label..."
+               autocomplete="off" spellcheck="false"/>
+        <div id="search-results"></div>
+      </div>
+    </section>
+
+    <section id="all-labels-section">
+      <button id="toggle-all-labels" type="button">
+        <span id="toggle-arrow">&#9654;</span> All labels
+        <span id="label-count" class="badge">0</span>
+      </button>
+      <div id="all-labels-list" class="collapsed"></div>
+    </section>
+
+    <div id="create-overlay" class="overlay hidden">
+      <div id="create-dialog">
+        <h3>Create new label</h3>
+        <input type="text" id="new-label-name" placeholder="Label name" autocomplete="off"/>
+        <p class="field-label">Color</p>
+        <div id="color-picker"></div>
+        <div class="dialog-buttons">
+          <button id="create-cancel" type="button" class="btn-secondary">Cancel</button>
+          <button id="create-confirm" type="button" class="btn-primary">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="delete-overlay" class="overlay hidden">
+      <div id="delete-dialog">
+        <h3>Delete label</h3>
+        <p id="delete-msg">Are you sure you want to delete this label?</p>
+        <div class="dialog-buttons">
+          <button id="delete-cancel" type="button" class="btn-secondary">Cancel</button>
+          <button id="delete-confirm" type="button" class="btn-danger">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="import-overlay" class="overlay hidden">
+      <div id="import-dialog">
+        <h3>Sync from Outlook</h3>
+        <p class="import-hint">Select the categories that belong to your account.</p>
+        <label class="import-select-all-row">
+          <input type="checkbox" id="import-select-all"/>
+          <span class="import-select-all-label">Select all</span>
+        </label>
+        <div id="import-list"></div>
+        <div class="dialog-buttons">
+          <button id="import-cancel" type="button" class="btn-secondary">Cancel</button>
+          <button id="import-confirm" type="button" class="btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="status-bar" class="hidden"></div>
+
+    <div id="loading" class="hidden">
+      <div class="spinner"></div>
+      <p>Loading labels...</p>
+    </div>
+
+    <div id="unsupported" class="hidden">
+      <p>This add-in requires Outlook with Mailbox API 1.8 or later.</p>
+    </div>
+
+    <div id="no-item" class="hidden">
+      <p>Select an email to manage labels.</p>
+    </div>
+  </div>
+
+  <script src="fuzzy.js"></script>
+  <script src="taskpane.js"></script>
+
+  <!-- ===== TEST PANEL ===== -->
+  <div id="test-panel">
+    <h2>Test Harness</h2>
+
+    <div class="info">
+      Mock user: <code>jon.gjosund@grieg.no</code><br/>
+      Master categories: <span class="badge-count" id="tp-master-count">6</span>
+      (3 own + 3 shared)<br/>
+      Item categories: <span class="badge-count" id="tp-item-count">1</span>
+    </div>
+
+    <h3>Mock Data</h3>
+    <div>
+      <button onclick="tpResetAll()">Reset all data + localStorage</button>
+      <button onclick="tpAddShared()">Add 3 more shared categories</button>
+    </div>
+
+    <h3>Scenarios</h3>
+    <div>
+      <button onclick="tpScenarioFirstRun()">First run (empty localStorage)</button>
+      <button onclick="tpScenarioReturning()">Returning user (3 own saved)</button>
+      <button onclick="tpScenarioEmailAutoImport()">Email with new category</button>
+    </div>
+
+    <h3>Checks</h3>
+    <div>
+      <button onclick="tpCheckVisibleLabels()">Count visible labels</button>
+      <button onclick="tpCheckLocalStorage()">Inspect localStorage</button>
+    </div>
+
+    <h3>Log</h3>
+    <div class="log" id="tp-log"></div>
+  </div>
+
+  <script>
+  (function () {
+    var logEl = document.getElementById('tp-log');
+
+    function log(msg, type) {
+      var cls = type === 'ok' ? 'ok' : type === 'err' ? 'err' : 'info-msg';
+      logEl.innerHTML += '<div class="' + cls + '">' + msg + '</div>';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function updateCounts() {
+      document.getElementById('tp-master-count').textContent =
+        window.__mockData.masterCategories.length;
+      document.getElementById('tp-item-count').textContent =
+        window.__mockData.itemCategories.length;
+    }
+
+    // --- Actions ---
+
+    window.tpResetAll = function () {
+      // Reset mock data to defaults
+      window.__mockData.masterCategories = [
+        { displayName: 'Project Alpha',  color: 'Preset4' },
+        { displayName: 'Urgent',         color: 'Preset0' },
+        { displayName: 'Follow Up',      color: 'Preset1' },
+        { displayName: 'Team Standup',   color: 'Preset7' },
+        { displayName: 'HR Policies',    color: 'Preset8' },
+        { displayName: 'Finance Review', color: 'Preset10' }
+      ];
+      window.__mockData.itemCategories = [
+        { displayName: 'Urgent', color: 'Preset0' }
+      ];
+      // Clear localStorage for this user
+      var key = 'outlook_labels_own_jon.gjosund@grieg.no';
+      localStorage.removeItem(key);
+      localStorage.removeItem('outlook_labels_imported_jon.gjosund@grieg.no');
+      updateCounts();
+      log('Reset mock data + cleared localStorage', 'ok');
+      log('Click Refresh in the add-in to reload', 'info-msg');
+    };
+
+    window.tpAddShared = function () {
+      var extras = [
+        { displayName: 'Legal Compliance', color: 'Preset15' },
+        { displayName: 'IT Support',       color: 'Preset22' },
+        { displayName: 'Company Events',   color: 'Preset3' }
+      ];
+      extras.forEach(function (cat) {
+        var exists = window.__mockData.masterCategories.some(function (c) {
+          return c.displayName === cat.displayName;
+        });
+        if (!exists) window.__mockData.masterCategories.push(cat);
+      });
+      updateCounts();
+      log('Added 3 more shared categories (total: ' + window.__mockData.masterCategories.length + ')', 'ok');
+      log('Click Refresh to see them in import dialog', 'info-msg');
+    };
+
+    window.tpScenarioFirstRun = function () {
+      tpResetAll();
+      // Trigger reload
+      document.getElementById('refresh-btn').click();
+      log('Scenario: First run — import dialog should auto-open', 'info-msg');
+    };
+
+    window.tpScenarioReturning = function () {
+      tpResetAll();
+      // Pre-save the 3 "own" categories and mark import as done
+      var key = 'outlook_labels_own_jon.gjosund@grieg.no';
+      localStorage.setItem(key, JSON.stringify(['Project Alpha', 'Urgent', 'Follow Up']));
+      localStorage.setItem('outlook_labels_imported_jon.gjosund@grieg.no', '1');
+      document.getElementById('refresh-btn').click();
+      log('Scenario: Returning user — should show 3 own labels only', 'info-msg');
+    };
+
+    window.tpScenarioEmailAutoImport = function () {
+      tpResetAll();
+      // Set up: user has 2 labels saved and has done import
+      var key = 'outlook_labels_own_jon.gjosund@grieg.no';
+      localStorage.setItem(key, JSON.stringify(['Project Alpha', 'Urgent']));
+      localStorage.setItem('outlook_labels_imported_jon.gjosund@grieg.no', '1');
+      // Simulate opening an email that has a new category
+      window.__mockData.itemCategories = [
+        { displayName: 'Urgent',    color: 'Preset0' },
+        { displayName: 'Follow Up', color: 'Preset1' }
+      ];
+      updateCounts();
+      document.getElementById('refresh-btn').click();
+      log('Scenario: Email has "Follow Up" — should auto-import it', 'info-msg');
+      setTimeout(function () {
+        var saved = JSON.parse(localStorage.getItem(key) || '[]');
+        if (saved.indexOf('Follow Up') !== -1) {
+          log('Auto-import OK: "Follow Up" added to known list (' + saved.length + ' total)', 'ok');
+        } else {
+          log('Auto-import FAILED: "Follow Up" not in known list', 'err');
+        }
+      }, 1500);
+    };
+
+    window.tpCheckVisibleLabels = function () {
+      var allRows = document.querySelectorAll('#all-labels-list .all-label-row');
+      var names = [];
+      allRows.forEach(function (row) {
+        var name = row.querySelector('.all-label-name');
+        if (name) names.push(name.textContent);
+      });
+      var badge = document.getElementById('label-count').textContent;
+      log('Visible in "All labels": ' + names.length + ' (badge says ' + badge + ')', 'info-msg');
+      names.forEach(function (n) { log('  • ' + n, 'info-msg'); });
+
+      var chips = document.querySelectorAll('#applied-labels-list .label-chip');
+      log('Applied chips: ' + chips.length, 'info-msg');
+    };
+
+    window.tpCheckLocalStorage = function () {
+      var key = 'outlook_labels_own_jon.gjosund@grieg.no';
+      var data = localStorage.getItem(key);
+      if (data) {
+        var arr = JSON.parse(data);
+        log('localStorage (' + arr.length + ' labels):', 'info-msg');
+        arr.forEach(function (n) { log('  • ' + n, 'info-msg'); });
+      } else {
+        log('localStorage: empty (no known labels)', 'info-msg');
+      }
+    };
+
+    // Init log
+    log('Test harness ready', 'ok');
+    log('6 mock categories loaded (3 own + 3 shared)', 'info-msg');
+    log('If import dialog auto-opens, that means localStorage was empty — pick your own categories!', 'info-msg');
+  })();
+  </script>
+</body>
+</html>

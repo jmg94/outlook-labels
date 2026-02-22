@@ -11,7 +11,10 @@
   <div id="app">
     <header>
       <h1>Labels</h1>
-      <button id="refresh-btn" type="button" title="Refresh">&#8635;</button>
+      <div class="header-actions">
+        <button id="import-btn" type="button" title="Sync from Outlook">&#9881;</button>
+        <button id="refresh-btn" type="button" title="Refresh">&#8635;</button>
+      </div>
     </header>
 
     <!-- Current labels on this email -->
@@ -62,6 +65,23 @@
         <div class="dialog-buttons">
           <button id="delete-cancel" type="button" class="btn-secondary">Cancel</button>
           <button id="delete-confirm" type="button" class="btn-danger">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Import from Outlook dialog -->
+    <div id="import-overlay" class="overlay hidden">
+      <div id="import-dialog">
+        <h3>Sync from Outlook</h3>
+        <p class="import-hint">Select the categories that belong to your account.</p>
+        <label class="import-select-all-row">
+          <input type="checkbox" id="import-select-all"/>
+          <span class="import-select-all-label">Select all</span>
+        </label>
+        <div id="import-list"></div>
+        <div class="dialog-buttons">
+          <button id="import-cancel" type="button" class="btn-secondary">Cancel</button>
+          <button id="import-confirm" type="button" class="btn-primary">Save</button>
         </div>
       </div>
     </div>

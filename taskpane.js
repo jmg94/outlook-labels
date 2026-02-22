@@ -1,6 +1,17 @@
 /**
  * Gmail Labels for Outlook — Task Pane Application Logic
  * Uses Office.js Categories API (Mailbox 1.8+) to manage labels.
+ *
+ * Category filtering strategy:
+ * masterCategories.getAsync() on legacy Mac Outlook returns categories from
+ * ALL accounts (including shared mailboxes). The API has no filter parameter
+ * and no account identifier on categories. Instead of probing (which is
+ * unreliable and risky), we maintain a self-curating "known labels" list in
+ * localStorage that grows organically:
+ *   - Labels created through this add-in are tracked automatically
+ *   - Labels found on emails you open are auto-imported (they must be yours)
+ *   - A manual "Import from Outlook" dialog lets you pick which categories
+ *     from the full master list are yours (one-time setup)
  */
 (function () {
   'use strict';
@@ -36,7 +47,8 @@
 
   // --- Application state ---
   var state = {
-    masterCategories: [],
+    masterCategories: [],   // Curated list: only labels the user has chosen/created
+    allApiCategories: [],   // Raw list from masterCategories.getAsync() (all accounts)
     itemCategories: [],
     searchQuery: '',
     searchResults: [],
@@ -62,6 +74,7 @@
     dom.allLabelsList = document.getElementById('all-labels-list');
     dom.labelCount = document.getElementById('label-count');
     dom.refreshBtn = document.getElementById('refresh-btn');
+    dom.importBtn = document.getElementById('import-btn');
     dom.createOverlay = document.getElementById('create-overlay');
     dom.createDialog = document.getElementById('create-dialog');
     dom.newLabelName = document.getElementById('new-label-name');
@@ -72,6 +85,11 @@
     dom.deleteMsg = document.getElementById('delete-msg');
     dom.deleteCancel = document.getElementById('delete-cancel');
     dom.deleteConfirm = document.getElementById('delete-confirm');
+    dom.importOverlay = document.getElementById('import-overlay');
+    dom.importList = document.getElementById('import-list');
+    dom.importSelectAll = document.getElementById('import-select-all');
+    dom.importCancel = document.getElementById('import-cancel');
+    dom.importConfirm = document.getElementById('import-confirm');
     dom.statusBar = document.getElementById('status-bar');
     dom.loading = document.getElementById('loading');
     dom.unsupported = document.getElementById('unsupported');
@@ -107,14 +125,13 @@
   function showStatus(message, type) {
     if (state.statusTimer) clearTimeout(state.statusTimer);
     dom.statusBar.textContent = message;
-    dom.statusBar.className = type; // 'success' or 'error'
+    dom.statusBar.className = type;
     state.statusTimer = setTimeout(function () {
       dom.statusBar.className = 'hidden';
     }, 3000);
   }
 
   function showView(view) {
-    // Hide everything
     dom.loading.classList.add('hidden');
     dom.unsupported.classList.add('hidden');
     dom.noItem.classList.add('hidden');
@@ -135,23 +152,27 @@
     }
   }
 
-  // --- Own-category tracking via localStorage ---
-  // masterCategories.getAsync() on legacy Mac Outlook returns categories from
-  // ALL accounts (including shared mailboxes). The API provides no filter.
-  // We track which categories belong to the user's own account by:
-  //   1. Recording every category we create via this add-in
-  //   2. On load, probing write access: try to add a temp category — if it
-  //      succeeds, we have write access and can probe individual categories
-  //   3. Categories that can be successfully re-added (no-op for own account)
-  //      are ours; ones that fail belong to shared accounts
-  // We cache the result in localStorage so the probe only runs once per session
-  // or when new unknown categories appear.
+  // --- localStorage: Known labels list ---
 
   var STORAGE_KEY_PREFIX = 'outlook_labels_own_';
+  var IMPORT_DONE_PREFIX = 'outlook_labels_imported_';
 
   function getStorageKey() {
     var email = (Office.context.mailbox.userProfile.emailAddress || 'unknown').toLowerCase();
     return STORAGE_KEY_PREFIX + email;
+  }
+
+  function getImportDoneKey() {
+    var email = (Office.context.mailbox.userProfile.emailAddress || 'unknown').toLowerCase();
+    return IMPORT_DONE_PREFIX + email;
+  }
+
+  function hasCompletedImport() {
+    return localStorage.getItem(getImportDoneKey()) === '1';
+  }
+
+  function markImportDone() {
+    try { localStorage.setItem(getImportDoneKey(), '1'); } catch (e) {}
   }
 
   function loadOwnCategoryNames() {
@@ -172,14 +193,11 @@
   function addOwnCategoryName(name) {
     var names = loadOwnCategoryNames();
     var lower = name.toLowerCase();
-    var found = false;
     for (var i = 0; i < names.length; i++) {
-      if (names[i].toLowerCase() === lower) { found = true; break; }
+      if (names[i].toLowerCase() === lower) return; // already tracked
     }
-    if (!found) {
-      names.push(name);
-      saveOwnCategoryNames(names);
-    }
+    names.push(name);
+    saveOwnCategoryNames(names);
   }
 
   function removeOwnCategoryName(name) {
@@ -189,107 +207,63 @@
     saveOwnCategoryNames(names);
   }
 
-  /**
-   * Probe a single category to check if it belongs to this account.
-   * Tries addAsync — for own-account categories that already exist, this
-   * fails with "DuplicateCategory". For shared-account categories, it fails
-   * with a different error (e.g. permission denied). If addAsync succeeds,
-   * the category was somehow missing and we just re-created it (still ours).
-   *
-   * So: Succeeded OR DuplicateCategory → own account.
-   *     Any other error → shared account.
-   */
-  function probeCategory(cat) {
-    return new Promise(function (resolve) {
-      var testCat = [{ displayName: cat.displayName, color: cat.color }];
-      Office.context.mailbox.masterCategories.addAsync(testCat, function (result) {
-        if (result.status === Office.AsyncResultStatus.Succeeded) {
-          // Category didn't exist yet in our account but was added — it's ours
-          resolve(true);
-        } else {
-          // Check error code: DuplicateCategory means it already exists in OUR list
-          var errCode = (result.error && result.error.code) || '';
-          var errMsg = (result.error && result.error.message) || '';
-          var isDuplicate = errCode === 'DuplicateCategory' ||
-                           errMsg.indexOf('DuplicateCategory') !== -1 ||
-                           errMsg.indexOf('duplicate') !== -1 ||
-                           errMsg.indexOf('already') !== -1;
-          resolve(isDuplicate);
-        }
-      });
-    });
-  }
-
-  /**
-   * Filter master categories to only those belonging to the user's own account.
-   * Uses cached known-own list first, then probes unknown ones.
-   */
-  function filterOwnCategories(allCategories) {
-    var knownOwn = loadOwnCategoryNames();
-    var knownOwnLower = knownOwn.map(function (n) { return n.toLowerCase(); });
-
-    var confirmed = [];
-    var unknown = [];
-
-    allCategories.forEach(function (cat) {
-      var nameLower = cat.displayName.toLowerCase();
-      if (knownOwnLower.indexOf(nameLower) !== -1) {
-        confirmed.push(cat);
-      } else {
-        unknown.push(cat);
-      }
-    });
-
-    if (unknown.length === 0) {
-      return Promise.resolve(confirmed);
+  function isOwnCategory(name) {
+    var names = loadOwnCategoryNames();
+    var lower = name.toLowerCase();
+    for (var i = 0; i < names.length; i++) {
+      if (names[i].toLowerCase() === lower) return true;
     }
-
-    // Probe unknown categories in parallel
-    var probes = unknown.map(function (cat) {
-      return probeCategory(cat).then(function (isOwn) {
-        return { category: cat, isOwn: isOwn };
-      });
-    });
-
-    return Promise.all(probes).then(function (results) {
-      var newOwnNames = [];
-      results.forEach(function (r) {
-        if (r.isOwn) {
-          confirmed.push(r.category);
-          newOwnNames.push(r.category.displayName);
-        }
-      });
-
-      // Update cache with newly confirmed own categories
-      if (newOwnNames.length > 0) {
-        var updated = knownOwn.concat(newOwnNames);
-        saveOwnCategoryNames(updated);
-      }
-
-      return confirmed;
-    });
+    return false;
   }
 
   // --- Office.js Categories API wrappers ---
 
-  function loadMasterCategories() {
+  function fetchAllApiCategories() {
     return new Promise(function (resolve, reject) {
       Office.context.mailbox.masterCategories.getAsync(function (result) {
         if (result.status === Office.AsyncResultStatus.Succeeded) {
-          var allCategories = result.value || [];
-          // Filter to only own-account categories
-          filterOwnCategories(allCategories).then(function (ownCategories) {
-            state.masterCategories = ownCategories;
-            // Sort alphabetically
-            state.masterCategories.sort(function (a, b) {
-              return a.displayName.localeCompare(b.displayName);
-            });
-            resolve(state.masterCategories);
-          });
+          state.allApiCategories = result.value || [];
+          resolve(state.allApiCategories);
         } else {
           reject(result.error);
         }
       });
+    });
+  }
+
+  function buildMasterCategoriesFromOwn() {
+    // Build the display list from our known-own names, cross-referenced
+    // with the API list to get current colors
+    var ownNames = loadOwnCategoryNames();
+    var apiMap = {};
+    state.allApiCategories.forEach(function (cat) {
+      apiMap[cat.displayName.toLowerCase()] = cat;
+    });
+
+    var result = [];
+    ownNames.forEach(function (name) {
+      var apiCat = apiMap[name.toLowerCase()];
+      if (apiCat) {
+        result.push(apiCat); // Use API version (has current color)
+      } else {
+        // Category in our list but not in API — might have been deleted externally
+        // Still show it so user can re-create or clean up
+        result.push({ displayName: name, color: 'Preset7' });
+      }
+    });
+
+    result.sort(function (a, b) {
+      return a.displayName.localeCompare(b.displayName);
+    });
+
+    state.masterCategories = result;
+    return result;
+  }
+
+  function loadMasterCategories() {
+    return fetchAllApiCategories().then(function () {
+      buildMasterCategoriesFromOwn();
+      return state.masterCategories;
     });
   }
 
@@ -304,6 +278,16 @@
       item.categories.getAsync(function (result) {
         if (result.status === Office.AsyncResultStatus.Succeeded) {
           state.itemCategories = result.value || [];
+
+          // Auto-import: categories on the user's own emails must be theirs
+          if (!state.isSharedMailbox) {
+            state.itemCategories.forEach(function (cat) {
+              addOwnCategoryName(cat.displayName);
+            });
+            // Rebuild master list with any newly discovered categories
+            buildMasterCategoriesFromOwn();
+          }
+
           resolve(state.itemCategories);
         } else {
           reject(result.error);
@@ -375,14 +359,11 @@
       }
       item.getSharedPropertiesAsync(function (result) {
         if (result.status === Office.AsyncResultStatus.Succeeded && result.value) {
-          // This item is from a shared/delegate mailbox
           var owner = result.value.owner || '';
           var userEmail = (Office.context.mailbox.userProfile.emailAddress || '').toLowerCase();
           state.primaryEmail = userEmail;
-          // If the owner is different from the logged-in user, it's shared
           state.isSharedMailbox = owner.toLowerCase() !== userEmail;
         } else {
-          // getSharedPropertiesAsync failed = this is the user's own mailbox
           state.isSharedMailbox = false;
         }
         resolve();
@@ -392,9 +373,7 @@
 
   function applySharedMailboxRestrictions() {
     if (state.isSharedMailbox) {
-      // Hide create/search — user can only view labels on shared items
       dom.searchSection.classList.add('hidden');
-      // Disable delete buttons and toggle in all-labels
       showStatus('Shared mailbox \u2014 view only', 'error');
     }
   }
@@ -413,6 +392,11 @@
         renderAppliedLabels();
         renderAllLabels();
         updateLabelCount();
+
+        // Auto-open import on first use (user hasn't done an import yet)
+        if (!hasCompletedImport() && state.allApiCategories.length > 0 && !state.isSharedMailbox) {
+          openImportDialog();
+        }
       })
       .catch(function (error) {
         showView('main');
@@ -436,7 +420,7 @@
       var chip = document.createElement('div');
       chip.className = 'label-chip';
       var hex = getColorHex(cat.color);
-      chip.style.backgroundColor = hex + '1A'; // ~10% opacity
+      chip.style.backgroundColor = hex + '1A';
       chip.style.borderColor = hex;
       chip.style.color = hex;
 
@@ -681,7 +665,6 @@
       dom.colorPicker.appendChild(swatch);
     });
 
-    // Pre-select Blue (Preset7)
     var defaultSwatch = dom.colorPicker.querySelector('[data-preset="Preset7"]');
     if (defaultSwatch) defaultSwatch.classList.add('selected');
   }
@@ -700,13 +683,14 @@
 
     var selectedSwatch = dom.colorPicker.querySelector('.color-swatch.selected');
     var presetKey = selectedSwatch ? selectedSwatch.getAttribute('data-preset') : 'Preset7';
-
-    // The color enum value to pass to Office.js
     var colorEnum = Office.MailboxEnums.CategoryColor[presetKey];
 
     addMasterCategory(name, colorEnum)
-      .then(function () { return loadMasterCategories(); })
-      .then(function () { return addLabelToItem(name); })
+      .then(function () { return fetchAllApiCategories(); })
+      .then(function () {
+        buildMasterCategoriesFromOwn();
+        return addLabelToItem(name);
+      })
       .then(function () { return loadItemCategories(); })
       .then(function () {
         closeCreateDialog();
@@ -741,8 +725,11 @@
     if (!name) return;
 
     deleteMasterCategory(name)
-      .then(function () { return loadMasterCategories(); })
-      .then(function () { return loadItemCategories(); })
+      .then(function () { return fetchAllApiCategories(); })
+      .then(function () {
+        buildMasterCategoriesFromOwn();
+        return loadItemCategories();
+      })
       .then(function () {
         closeDeleteDialog();
         renderAppliedLabels();
@@ -757,12 +744,102 @@
       });
   }
 
+  // --- Import Dialog ---
+
+  function openImportDialog() {
+    dom.importList.innerHTML = '';
+    var ownNames = loadOwnCategoryNames();
+    var ownLower = ownNames.map(function (n) { return n.toLowerCase(); });
+
+    // Sort API categories alphabetically
+    var sorted = state.allApiCategories.slice().sort(function (a, b) {
+      return a.displayName.localeCompare(b.displayName);
+    });
+
+    if (sorted.length === 0) {
+      var emptyMsg = document.createElement('p');
+      emptyMsg.className = 'empty-state';
+      emptyMsg.textContent = 'No categories found in Outlook.';
+      dom.importList.appendChild(emptyMsg);
+      dom.importOverlay.classList.remove('hidden');
+      return;
+    }
+
+    sorted.forEach(function (cat) {
+      var row = document.createElement('label');
+      row.className = 'import-row';
+
+      var checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = cat.displayName;
+      checkbox.checked = ownLower.indexOf(cat.displayName.toLowerCase()) !== -1;
+
+      var colorDot = document.createElement('span');
+      colorDot.className = 'color-dot';
+      colorDot.style.backgroundColor = getColorHex(cat.color);
+
+      var nameSpan = document.createElement('span');
+      nameSpan.className = 'import-name';
+      nameSpan.textContent = cat.displayName;
+
+      row.appendChild(checkbox);
+      row.appendChild(colorDot);
+      row.appendChild(nameSpan);
+      dom.importList.appendChild(row);
+    });
+
+    // Update select-all state
+    updateSelectAllState();
+
+    dom.importOverlay.classList.remove('hidden');
+  }
+
+  function closeImportDialog() {
+    dom.importOverlay.classList.add('hidden');
+  }
+
+  function updateSelectAllState() {
+    var checkboxes = dom.importList.querySelectorAll('input[type="checkbox"]');
+    var allChecked = true;
+    checkboxes.forEach(function (cb) {
+      if (!cb.checked) allChecked = false;
+    });
+    dom.importSelectAll.checked = allChecked && checkboxes.length > 0;
+  }
+
+  function handleSelectAllToggle() {
+    var checked = dom.importSelectAll.checked;
+    var checkboxes = dom.importList.querySelectorAll('input[type="checkbox"]');
+    checkboxes.forEach(function (cb) {
+      cb.checked = checked;
+    });
+  }
+
+  function handleImportConfirm() {
+    var checkboxes = dom.importList.querySelectorAll('input[type="checkbox"]');
+    var selectedNames = [];
+    checkboxes.forEach(function (cb) {
+      if (cb.checked) {
+        selectedNames.push(cb.value);
+      }
+    });
+
+    saveOwnCategoryNames(selectedNames);
+    markImportDone();
+    buildMasterCategoriesFromOwn();
+
+    closeImportDialog();
+    renderAllLabels();
+    updateLabelCount();
+    renderSearchResults();
+    showStatus('Imported ' + selectedNames.length + ' label' + (selectedNames.length !== 1 ? 's' : ''), 'success');
+  }
+
   // --- Keyboard Navigation for Search ---
 
   function getTotalResultCount() {
     var count = state.searchResults.length;
     var query = state.searchQuery.trim();
-    // +1 for "Create new" row if shown
     if (query && !FuzzySearch.hasExactMatch(query, state.masterCategories)) {
       count++;
     }
@@ -811,7 +888,6 @@
   // --- Event Binding ---
 
   function bindEvents() {
-    // Search input
     dom.searchInput.addEventListener('input', debounce(function () {
       state.searchQuery = dom.searchInput.value;
       state.focusedResultIndex = -1;
@@ -820,7 +896,6 @@
 
     dom.searchInput.addEventListener('keydown', handleSearchKeydown);
 
-    // Close search results when clicking outside
     document.addEventListener('click', function (e) {
       if (!dom.searchInput.contains(e.target) && !dom.searchResults.contains(e.target)) {
         dom.searchResults.innerHTML = '';
@@ -828,14 +903,12 @@
       }
     });
 
-    // Re-show results when clicking back into search input
     dom.searchInput.addEventListener('focus', function () {
       if (state.searchQuery.trim()) {
         performSearch();
       }
     });
 
-    // Toggle all labels
     dom.toggleAllBtn.addEventListener('click', function () {
       state.isAllLabelsExpanded = !state.isAllLabelsExpanded;
       if (state.isAllLabelsExpanded) {
@@ -849,8 +922,10 @@
       }
     });
 
-    // Refresh
     dom.refreshBtn.addEventListener('click', function () { loadAllData(); });
+
+    // Import button
+    dom.importBtn.addEventListener('click', function () { openImportDialog(); });
 
     // Create dialog
     dom.createCancel.addEventListener('click', closeCreateDialog);
@@ -869,6 +944,17 @@
     dom.deleteOverlay.addEventListener('click', function (e) {
       if (e.target === dom.deleteOverlay) closeDeleteDialog();
     });
+
+    // Import dialog
+    dom.importCancel.addEventListener('click', closeImportDialog);
+    dom.importConfirm.addEventListener('click', handleImportConfirm);
+    dom.importOverlay.addEventListener('click', function (e) {
+      if (e.target === dom.importOverlay) closeImportDialog();
+    });
+    dom.importSelectAll.addEventListener('change', handleSelectAllToggle);
+    dom.importList.addEventListener('change', function (e) {
+      if (e.target.type === 'checkbox') updateSelectAllState();
+    });
   }
 
   // --- Initialization ---
@@ -878,13 +964,11 @@
 
     if (info.host !== Office.HostType.Outlook) return;
 
-    // Check API support
     if (!Office.context.requirements.isSetSupported('Mailbox', '1.8')) {
       showView('unsupported');
       return;
     }
 
-    // Check that an item is selected
     if (!Office.context.mailbox.item) {
       showView('no-item');
       return;
