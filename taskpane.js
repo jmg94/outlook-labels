@@ -117,6 +117,29 @@
     };
   }
 
+  // Batch multiple render calls into one rAF to avoid layout thrashing.
+  // Mac Outlook's NSTableView-backed webview can crash (EXC_CRASH / SIGTRAP)
+  // when multiple innerHTML-clearing render passes trigger deeply recursive
+  // _layoutSubtreeWithOldSize: during the same display cycle.
+  var _pendingRenders = {};
+  var _rafScheduled = false;
+
+  function scheduleRender(key, fn) {
+    _pendingRenders[key] = fn;
+    if (!_rafScheduled) {
+      _rafScheduled = true;
+      requestAnimationFrame(function () {
+        _rafScheduled = false;
+        var batch = _pendingRenders;
+        _pendingRenders = {};
+        var keys = Object.keys(batch);
+        for (var i = 0; i < keys.length; i++) {
+          batch[keys[i]]();
+        }
+      });
+    }
+  }
+
   function getColorHex(colorEnum) {
     var info = CATEGORY_COLORS[colorEnum];
     return info ? info.hex : '#888888';
@@ -411,9 +434,9 @@
       .then(function () {
         showView('main');
         applySharedMailboxRestrictions();
-        renderAppliedLabels();
-        renderAllLabels();
-        updateLabelCount();
+        scheduleRender('applied', renderAppliedLabels);
+        scheduleRender('allLabels', renderAllLabels);
+        scheduleRender('labelCount', updateLabelCount);
 
         // Auto-open import on first use (user hasn't done an import yet)
         if (!hasCompletedImport() && state.allApiCategories.length > 0 && !state.isSharedMailbox) {
@@ -429,51 +452,53 @@
   // --- Rendering: Applied Labels ---
 
   function renderAppliedLabels() {
-    dom.appliedList.innerHTML = '';
+    var frag = document.createDocumentFragment();
 
     if (state.itemCategories.length === 0) {
       dom.noLabelsMsg.classList.remove('hidden');
-      return;
+    } else {
+      dom.noLabelsMsg.classList.add('hidden');
+
+      state.itemCategories.forEach(function (cat) {
+        var chip = document.createElement('div');
+        chip.className = 'label-chip';
+        var hex = getColorHex(cat.color);
+        chip.style.backgroundColor = hex + '1A';
+        chip.style.borderColor = hex;
+        chip.style.color = hex;
+
+        var nameSpan = document.createElement('span');
+        nameSpan.className = 'chip-name';
+        nameSpan.textContent = cat.displayName;
+
+        chip.appendChild(nameSpan);
+
+        if (!state.isSharedMailbox) {
+          var removeBtn = document.createElement('button');
+          removeBtn.className = 'chip-remove';
+          removeBtn.textContent = '\u00D7';
+          removeBtn.title = 'Remove ' + cat.displayName;
+          removeBtn.addEventListener('click', function () {
+            handleRemoveLabel(cat.displayName);
+          });
+          chip.appendChild(removeBtn);
+        }
+
+        frag.appendChild(chip);
+      });
     }
 
-    dom.noLabelsMsg.classList.add('hidden');
-
-    state.itemCategories.forEach(function (cat) {
-      var chip = document.createElement('div');
-      chip.className = 'label-chip';
-      var hex = getColorHex(cat.color);
-      chip.style.backgroundColor = hex + '1A';
-      chip.style.borderColor = hex;
-      chip.style.color = hex;
-
-      var nameSpan = document.createElement('span');
-      nameSpan.className = 'chip-name';
-      nameSpan.textContent = cat.displayName;
-
-      chip.appendChild(nameSpan);
-
-      if (!state.isSharedMailbox) {
-        var removeBtn = document.createElement('button');
-        removeBtn.className = 'chip-remove';
-        removeBtn.textContent = '\u00D7';
-        removeBtn.title = 'Remove ' + cat.displayName;
-        removeBtn.addEventListener('click', function () {
-          handleRemoveLabel(cat.displayName);
-        });
-        chip.appendChild(removeBtn);
-      }
-
-      dom.appliedList.appendChild(chip);
-    });
+    dom.appliedList.innerHTML = '';
+    dom.appliedList.appendChild(frag);
   }
 
   function handleRemoveLabel(displayName) {
     removeLabelFromItem(displayName)
       .then(function () { return loadItemCategories(); })
       .then(function () {
-        renderAppliedLabels();
-        renderAllLabels();
-        renderSearchResults();
+        scheduleRender('applied', renderAppliedLabels);
+        scheduleRender('allLabels', renderAllLabels);
+        scheduleRender('search', renderSearchResults);
       })
       .catch(function (err) {
         showStatus('Error removing label: ' + (err.message || err), 'error');
@@ -508,71 +533,74 @@
   }
 
   function renderSearchResults() {
-    dom.searchResults.innerHTML = '';
+    var frag = document.createDocumentFragment();
 
     var query = state.searchQuery.trim();
-    if (!query) return;
+    if (query) {
+      var results = state.searchResults;
+      var exactMatchExists = FuzzySearch.hasExactMatch(query, state.masterCategories);
 
-    var results = state.searchResults;
-    var exactMatchExists = FuzzySearch.hasExactMatch(query, state.masterCategories);
+      results.forEach(function (result, index) {
+        var row = document.createElement('div');
+        row.className = 'search-result-row';
+        row.setAttribute('data-index', String(index));
 
-    results.forEach(function (result, index) {
-      var row = document.createElement('div');
-      row.className = 'search-result-row';
-      row.setAttribute('data-index', String(index));
+        var isApplied = isLabelApplied(result.category.displayName);
+        if (isApplied) row.classList.add('already-applied');
+        if (index === state.focusedResultIndex) row.classList.add('focused');
 
-      var isApplied = isLabelApplied(result.category.displayName);
-      if (isApplied) row.classList.add('already-applied');
-      if (index === state.focusedResultIndex) row.classList.add('focused');
+        var colorDot = document.createElement('span');
+        colorDot.className = 'color-dot';
+        colorDot.style.backgroundColor = getColorHex(result.category.color);
 
-      var colorDot = document.createElement('span');
-      colorDot.className = 'color-dot';
-      colorDot.style.backgroundColor = getColorHex(result.category.color);
+        var nameSpan = document.createElement('span');
+        nameSpan.className = 'result-name';
+        nameSpan.innerHTML = highlightMatch(result.category.displayName, result.matchRanges);
 
-      var nameSpan = document.createElement('span');
-      nameSpan.className = 'result-name';
-      nameSpan.innerHTML = highlightMatch(result.category.displayName, result.matchRanges);
+        var checkSpan = document.createElement('span');
+        checkSpan.className = 'result-check';
+        checkSpan.textContent = isApplied ? '\u2713' : '';
 
-      var checkSpan = document.createElement('span');
-      checkSpan.className = 'result-check';
-      checkSpan.textContent = isApplied ? '\u2713' : '';
+        row.appendChild(colorDot);
+        row.appendChild(nameSpan);
+        row.appendChild(checkSpan);
 
-      row.appendChild(colorDot);
-      row.appendChild(nameSpan);
-      row.appendChild(checkSpan);
+        row.addEventListener('click', function () {
+          handleToggleLabel(result.category.displayName, isApplied);
+        });
 
-      row.addEventListener('click', function () {
-        handleToggleLabel(result.category.displayName, isApplied);
+        frag.appendChild(row);
       });
 
-      dom.searchResults.appendChild(row);
-    });
+      // "Create new label" option
+      if (!exactMatchExists && query.length > 0) {
+        var createRow = document.createElement('div');
+        createRow.className = 'search-result-row create-new';
+        var totalIndex = results.length;
+        createRow.setAttribute('data-index', String(totalIndex));
+        if (totalIndex === state.focusedResultIndex) createRow.classList.add('focused');
 
-    // "Create new label" option
-    if (!exactMatchExists && query.length > 0) {
-      var createRow = document.createElement('div');
-      createRow.className = 'search-result-row create-new';
-      var totalIndex = results.length;
-      createRow.setAttribute('data-index', String(totalIndex));
-      if (totalIndex === state.focusedResultIndex) createRow.classList.add('focused');
+        var plusIcon = document.createElement('span');
+        plusIcon.className = 'create-icon';
+        plusIcon.textContent = '+';
 
-      var plusIcon = document.createElement('span');
-      plusIcon.className = 'create-icon';
-      plusIcon.textContent = '+';
+        var createText = document.createElement('span');
+        createText.className = 'create-text';
+        createText.textContent = 'Create \u201C' + query + '\u201D';
 
-      var createText = document.createElement('span');
-      createText.className = 'create-text';
-      createText.textContent = 'Create \u201C' + query + '\u201D';
+        createRow.appendChild(plusIcon);
+        createRow.appendChild(createText);
 
-      createRow.appendChild(plusIcon);
-      createRow.appendChild(createText);
+        createRow.addEventListener('click', function () {
+          openCreateDialog(query);
+        });
 
-      createRow.addEventListener('click', function () {
-        openCreateDialog(query);
-      });
-
-      dom.searchResults.appendChild(createRow);
+        frag.appendChild(createRow);
+      }
     }
+
+    dom.searchResults.innerHTML = '';
+    dom.searchResults.appendChild(frag);
   }
 
   function handleToggleLabel(displayName, isCurrentlyApplied) {
@@ -583,9 +611,9 @@
     action
       .then(function () { return loadItemCategories(); })
       .then(function () {
-        renderAppliedLabels();
-        renderAllLabels();
-        renderSearchResults();
+        scheduleRender('applied', renderAppliedLabels);
+        scheduleRender('allLabels', renderAllLabels);
+        scheduleRender('search', renderSearchResults);
       })
       .catch(function (err) {
         showStatus('Error: ' + (err.message || err), 'error');
@@ -602,7 +630,7 @@
   // --- Rendering: All Labels ---
 
   function renderAllLabels() {
-    dom.allLabelsList.innerHTML = '';
+    var frag = document.createDocumentFragment();
 
     state.masterCategories.forEach(function (cat) {
       var row = document.createElement('div');
@@ -641,8 +669,11 @@
         });
       }
 
-      dom.allLabelsList.appendChild(row);
+      frag.appendChild(row);
     });
+
+    dom.allLabelsList.innerHTML = '';
+    dom.allLabelsList.appendChild(frag);
   }
 
   function updateLabelCount() {
@@ -719,9 +750,9 @@
         dom.searchInput.value = '';
         state.searchQuery = '';
         dom.searchResults.innerHTML = '';
-        renderAppliedLabels();
-        renderAllLabels();
-        updateLabelCount();
+        scheduleRender('applied', renderAppliedLabels);
+        scheduleRender('allLabels', renderAllLabels);
+        scheduleRender('labelCount', updateLabelCount);
         showStatus('Label \u201C' + name + '\u201D created and applied', 'success');
       })
       .catch(function (err) {
@@ -754,19 +785,19 @@
       })
       .then(function () {
         closeDeleteDialog();
-        renderAppliedLabels();
-        renderAllLabels();
-        updateLabelCount();
-        renderSearchResults();
+        scheduleRender('applied', renderAppliedLabels);
+        scheduleRender('allLabels', renderAllLabels);
+        scheduleRender('labelCount', updateLabelCount);
+        scheduleRender('search', renderSearchResults);
         showStatus('Label \u201C' + name + '\u201D deleted', 'success');
       })
       .catch(function (err) {
         closeDeleteDialog();
         buildMasterCategoriesFromOwn();
-        renderAppliedLabels();
-        renderAllLabels();
-        updateLabelCount();
-        renderSearchResults();
+        scheduleRender('applied', renderAppliedLabels);
+        scheduleRender('allLabels', renderAllLabels);
+        scheduleRender('labelCount', updateLabelCount);
+        scheduleRender('search', renderSearchResults);
         var msg = (err && err.message) ? err.message : String(err || 'Unknown error');
         showStatus('Error deleting label: ' + msg, 'error');
       });
@@ -857,9 +888,9 @@
     buildMasterCategoriesFromOwn();
 
     closeImportDialog();
-    renderAllLabels();
-    updateLabelCount();
-    renderSearchResults();
+    scheduleRender('allLabels', renderAllLabels);
+    scheduleRender('labelCount', updateLabelCount);
+    scheduleRender('search', renderSearchResults);
     showStatus('Imported ' + selectedNames.length + ' label' + (selectedNames.length !== 1 ? 's' : ''), 'success');
   }
 
