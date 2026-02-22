@@ -321,15 +321,37 @@
 
   function addMasterCategory(displayName, colorPreset) {
     return new Promise(function (resolve, reject) {
-      var newCat = [{ displayName: displayName, color: colorPreset }];
-      Office.context.mailbox.masterCategories.addAsync(newCat, function (result) {
-        if (result.status === Office.AsyncResultStatus.Succeeded) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (!done) {
+          done = true;
           addOwnCategoryName(displayName);
-          resolve();
-        } else {
-          reject(result.error);
+          reject({ message: 'Add timed out — added to list only' });
         }
-      });
+      }, 5000);
+
+      try {
+        var newCat = [{ displayName: displayName, color: colorPreset }];
+        Office.context.mailbox.masterCategories.addAsync(newCat, function (result) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          if (result.status === Office.AsyncResultStatus.Succeeded) {
+            addOwnCategoryName(displayName);
+            resolve();
+          } else {
+            addOwnCategoryName(displayName);
+            reject(result.error || { message: 'Unknown error' });
+          }
+        });
+      } catch (e) {
+        if (!done) {
+          done = true;
+          clearTimeout(timer);
+          addOwnCategoryName(displayName);
+          reject(e);
+        }
+      }
     });
   }
 
@@ -370,25 +392,49 @@
 
   function addLabelToItem(displayName) {
     return new Promise(function (resolve, reject) {
-      Office.context.mailbox.item.categories.addAsync([displayName], function (result) {
-        if (result.status === Office.AsyncResultStatus.Succeeded) {
-          resolve();
-        } else {
-          reject(result.error);
-        }
-      });
+      var done = false;
+      var timer = setTimeout(function () {
+        if (!done) { done = true; resolve(); }
+      }, 5000);
+
+      try {
+        Office.context.mailbox.item.categories.addAsync([displayName], function (result) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          if (result.status === Office.AsyncResultStatus.Succeeded) {
+            resolve();
+          } else {
+            reject(result.error || { message: 'Unknown error' });
+          }
+        });
+      } catch (e) {
+        if (!done) { done = true; clearTimeout(timer); reject(e); }
+      }
     });
   }
 
   function removeLabelFromItem(displayName) {
     return new Promise(function (resolve, reject) {
-      Office.context.mailbox.item.categories.removeAsync([displayName], function (result) {
-        if (result.status === Office.AsyncResultStatus.Succeeded) {
-          resolve();
-        } else {
-          reject(result.error);
-        }
-      });
+      var done = false;
+      var timer = setTimeout(function () {
+        if (!done) { done = true; resolve(); }
+      }, 5000);
+
+      try {
+        Office.context.mailbox.item.categories.removeAsync([displayName], function (result) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          if (result.status === Office.AsyncResultStatus.Succeeded) {
+            resolve();
+          } else {
+            reject(result.error || { message: 'Unknown error' });
+          }
+        });
+      } catch (e) {
+        if (!done) { done = true; clearTimeout(timer); reject(e); }
+      }
     });
   }
 
@@ -494,6 +540,9 @@
 
   function handleRemoveLabel(displayName) {
     removeLabelFromItem(displayName)
+      .then(function () {
+        return new Promise(function (r) { setTimeout(r, 200); });
+      })
       .then(function () { return loadItemCategories(); })
       .then(function () {
         scheduleRender('applied', renderAppliedLabels);
@@ -609,6 +658,10 @@
       : addLabelToItem(displayName);
 
     action
+      .then(function () {
+        // Let Outlook's native renderer settle after category mutation
+        return new Promise(function (r) { setTimeout(r, 200); });
+      })
       .then(function () { return loadItemCategories(); })
       .then(function () {
         scheduleRender('applied', renderAppliedLabels);
@@ -742,8 +795,11 @@
       .then(function () { return fetchAllApiCategories(); })
       .then(function () {
         buildMasterCategoriesFromOwn();
-        return addLabelToItem(name);
+        // Let Outlook's native renderer finish drawing the new category badge
+        // before mutating item categories (prevents OlkUIKit image crash)
+        return new Promise(function (r) { setTimeout(r, 200); });
       })
+      .then(function () { return addLabelToItem(name); })
       .then(function () { return loadItemCategories(); })
       .then(function () {
         closeCreateDialog();
@@ -781,8 +837,11 @@
       .then(function () { return fetchAllApiCategories(); })
       .then(function () {
         buildMasterCategoriesFromOwn();
-        return loadItemCategories();
+        // Let Outlook's native renderer finish redrawing after category removal
+        // before querying item categories (prevents OlkUIKit image crash)
+        return new Promise(function (r) { setTimeout(r, 200); });
       })
+      .then(function () { return loadItemCategories(); })
       .then(function () {
         closeDeleteDialog();
         scheduleRender('applied', renderAppliedLabels);
